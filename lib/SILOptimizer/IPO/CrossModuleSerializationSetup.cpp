@@ -24,6 +24,7 @@
 #include "swift/SIL/SILCloner.h"
 #include "swift/AST/Module.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace swift;
 
@@ -181,12 +182,17 @@ makeSubstUsableFromInline(const SubstitutionMap &substs) {
     }
   }
 }
+static llvm::cl::opt<bool> SerializeEverything("sil-cross-module-serialize-all",
+                                               llvm::cl::default(false),
+                                               llvm::cl::desc("Serialize everything when performing cross module optimization in order to investigate performance differences caused by different @inlinable, @usableFromInline choices."),
+                                               llvm::cl::Hidden);
 
 /// Decide whether to serialize a function.
 static bool shouldSerialize(SILFunction *F) {
   // The basic heursitic: serialize all generic functions, because it makes a
   // huge difference if generic functions can be specialized or not.
-  if (!F->getLoweredFunctionType()->isPolymorphic())
+  if (!F->getLoweredFunctionType()->isPolymorphic() &&
+      !SerializeEverything)
     return false;
 
   // Check if we already handled this function before.

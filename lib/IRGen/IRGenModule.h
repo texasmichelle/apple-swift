@@ -106,7 +106,6 @@ namespace swift {
   class SILModule;
   class SILProperty;
   class SILType;
-  class SILVTable;
   class SILWitnessTable;
   class SourceLoc;
   class SourceFile;
@@ -1392,8 +1391,6 @@ public:
                                             llvm::Constant *definition);
   llvm::Constant *getAddrOfMethodDescriptor(SILDeclRef declRef,
                                             ForDefinition_t forDefinition);
-  void emitNonoverriddenMethodDescriptor(const SILVTable *VTable,
-                                         SILDeclRef declRef);
 
   Address getAddrOfEnumCase(EnumElementDecl *Case,
                             ForDefinition_t forDefinition);

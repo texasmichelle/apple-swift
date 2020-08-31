@@ -338,14 +338,6 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
       super::addReifiedVTableEntry(fn);
     }
     
-    void noteNonoverriddenMethod(SILDeclRef fn) {
-      if (fn.getDecl()->getDeclContext() == Target) {
-        auto impl = VTable->getEntry(IGM.getSILModule(), fn);
-        Layout.MethodInfos.try_emplace(fn,
-         IGM.getAddrOfSILFunction(impl->getImplementation(), NotForDefinition));
-      }
-    }
-
     void noteStartOfFieldOffsets(ClassDecl *forClass) {
       if (forClass == Target)
         Layout.FieldOffsetVector = getNextOffset();
@@ -406,14 +398,8 @@ Size ClassMetadataLayout::getInstanceAlignMaskOffset() const {
 ClassMetadataLayout::MethodInfo
 ClassMetadataLayout::getMethodInfo(IRGenFunction &IGF, SILDeclRef method) const{
   auto &stored = getStoredMethodInfo(method);
-  switch (stored.TheKind) {
-  case MethodInfo::Kind::Offset: {
-    auto offset = emitOffset(IGF, stored.TheOffset);
-    return MethodInfo(offset);
-  }
-  case MethodInfo::Kind::DirectImpl:
-    return MethodInfo(stored.TheImpl);
-  }
+  auto offset = emitOffset(IGF, stored.TheOffset);
+  return MethodInfo(offset);
 }
 
 Offset ClassMetadataLayout::getFieldOffset(IRGenFunction &IGF,

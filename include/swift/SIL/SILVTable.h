@@ -64,8 +64,7 @@ public:
     // Please update the PointerIntPair above if you add/remove enums.
   };
 
-  SILVTableEntry() : ImplAndKind(nullptr, Kind::Normal),
-                     IsNonOverridden(false) {}
+  SILVTableEntry() : ImplAndKind(nullptr, Kind::Normal) {}
 
   SILVTableEntry(SILDeclRef Method, SILFunction *Implementation, Kind TheKind,
                  bool NonOverridden)
@@ -82,18 +81,6 @@ public:
 
   SILFunction *getImplementation() const { return ImplAndKind.getPointer(); }
   
-  void print(llvm::raw_ostream &os) const;
-  
-  bool operator==(const SILVTableEntry &e) const {
-    return Method == e.Method
-      && getImplementation() == e.getImplementation()
-      && getKind() == e.getKind()
-      && isNonOverridden() == e.isNonOverridden();
-  }
-  
-  bool operator!=(const SILVTableEntry &e) const {
-    return !(*this == e);
-  }
 };
 
 /// A mapping from each dynamically-dispatchable method of a class to the
@@ -160,8 +147,6 @@ public:
     return {getTrailingObjects<SILVTableEntry>(), NumEntries};
   }
                           
-  void updateVTableCache(const Entry &entry);
-
   /// Look up the implementation function for the given method.
   Optional<Entry> getEntry(SILModule &M, SILDeclRef method) const;
 

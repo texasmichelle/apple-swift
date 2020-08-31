@@ -20,27 +20,18 @@
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 
-STATISTIC(NumNonoverriddenVTableEntries,
-          "# of vtable entries marked non-overridden");
-
 using namespace swift;
 
 namespace {
 class PruneVTables : public SILModuleTransform {
   void runOnVTable(SILModule *M,
                    SILVTable *vtable) {
-    LLVM_DEBUG(llvm::dbgs() << "PruneVTables inspecting table:\n";
-               vtable->print(llvm::dbgs()));
     for (auto &entry : vtable->getMutableEntries()) {
       
       // We don't need to worry about entries that are overridden,
       // or have already been found to have no overrides.
-      if (entry.isNonOverridden()) {
-        LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                   entry.getMethod().print(llvm::dbgs());
-                   llvm::dbgs() << " is already nonoverridden\n");
+      if (entry.isNonOverridden())
         continue;
-      }
       
       switch (entry.getKind()) {
       case SILVTable::Entry::Normal:
@@ -48,52 +39,29 @@ class PruneVTables : public SILModuleTransform {
         break;
           
       case SILVTable::Entry::Override:
-        LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                   entry.getMethod().print(llvm::dbgs());
-                   llvm::dbgs() << " is an override\n");
         continue;
       }
 
       // The destructor entry must remain.
       if (entry.getMethod().kind == SILDeclRef::Kind::Deallocator) {
-        LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                   entry.getMethod().print(llvm::dbgs());
-                   llvm::dbgs() << " is a destructor\n");
         continue;
       }
 
       auto methodDecl = entry.getMethod().getAbstractFunctionDecl();
-      if (!methodDecl) {
-        LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                   entry.getMethod().print(llvm::dbgs());
-                   llvm::dbgs() << " is not a function decl\n");
+      if (!methodDecl)
         continue;
-      }
 
       // Is the method declared final?
       if (!methodDecl->isFinal()) {
         // Are callees of this entry statically knowable?
-        if (!calleesAreStaticallyKnowable(*M, entry.getMethod())) {
-          LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                     entry.getMethod().print(llvm::dbgs());
-                     llvm::dbgs() << " does not have statically-knowable callees\n");
+        if (!calleesAreStaticallyKnowable(*M, entry.getMethod()))
           continue;
-        }
         
         // Does the method have any overrides in this module?
-        if (methodDecl->isOverridden()) {
-          LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
-                     entry.getMethod().print(llvm::dbgs());
-                     llvm::dbgs() << " has overrides\n");
+        if (methodDecl->isOverridden())
           continue;
-        }
       }
-      LLVM_DEBUG(llvm::dbgs() << "++ entry for ";
-                 entry.getMethod().print(llvm::dbgs());
-                 llvm::dbgs() << " can be marked non-overridden!\n");
-      ++NumNonoverriddenVTableEntries;
       entry.setNonOverridden(true);
-      vtable->updateVTableCache(entry);
     }
   }
   

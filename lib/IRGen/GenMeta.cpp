@@ -263,60 +263,6 @@ static Flags getMethodDescriptorFlags(ValueDecl *fn) {
   return Flags(kind).withIsInstance(!fn->isStatic());
 }
 
-static void buildMethodDescriptorFields(IRGenModule &IGM,
-                             const SILVTable *VTable,
-                             SILDeclRef fn,
-                             ConstantStructBuilder &descriptor) {
-  auto *func = cast<AbstractFunctionDecl>(fn.getDecl());
-  // Classify the method.
-  using Flags = MethodDescriptorFlags;
-  auto flags = getMethodDescriptorFlags<Flags>(func);
-
-  // Remember if the declaration was dynamic.
-  if (func->shouldUseObjCDispatch())
-    flags = flags.withIsDynamic(true);
-
-  // Include the pointer-auth discriminator.
-  if (auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods) {
-    auto discriminator =
-      PointerAuthInfo::getOtherDiscriminator(IGM, schema, fn);
-    flags = flags.withExtraDiscriminator(discriminator->getZExtValue());
-  }
-
-  // TODO: final? open?
-  descriptor.addInt(IGM.Int32Ty, flags.getIntValue());
-
-  if (auto entry = VTable->getEntry(IGM.getSILModule(), fn)) {
-    assert(entry->getKind() == SILVTable::Entry::Kind::Normal);
-    auto *implFn = IGM.getAddrOfSILFunction(entry->getImplementation(),
-                                            NotForDefinition);
-    descriptor.addRelativeAddress(implFn);
-  } else {
-    // The method is removed by dead method elimination.
-    // It should be never called. We add a pointer to an error function.
-    descriptor.addRelativeAddressOrNull(nullptr);
-  }
-}
-
-void IRGenModule::emitNonoverriddenMethodDescriptor(const SILVTable *VTable,
-                                                    SILDeclRef declRef) {
-  auto entity = LinkEntity::forMethodDescriptor(declRef);
-  auto *var = cast<llvm::GlobalVariable>(getAddrOfLLVMVariable(entity, ConstantInit(), DebugTypeInfo()));
-  if (!var->isDeclaration()) {
-    assert(IRGen.isLazilyReemittingNominalTypeDescriptor(VTable->getClass()));
-    return;
-  }
-
-  ConstantInitBuilder ib(*this);
-  ConstantStructBuilder sb(ib.beginStruct(MethodDescriptorStructTy));
-
-  buildMethodDescriptorFields(*this, VTable, declRef, sb);
-  
-  auto init = sb.finishAndCreateFuture();
-  
-  getAddrOfLLVMVariable(entity, init, DebugTypeInfo());
-}
-
 namespace {
   template<class Impl>
   class ContextDescriptorBuilderBase {
@@ -1516,7 +1462,6 @@ namespace {
 
     SILVTable *VTable;
     bool Resilient;
-    bool HasNonoverriddenMethods = false;
 
     SmallVector<SILDeclRef, 8> VTableEntries;
     SmallVector<std::pair<SILDeclRef, SILDeclRef>, 8> OverrideTableEntries;
@@ -1641,15 +1586,14 @@ namespace {
         }
       );
 
-      // Only emit a method lookup function if the class is resilient
-      // and has a non-empty vtable, as well as no elided methods.
-      if (IGM.hasResilientMetadata(getType(), ResilienceExpansion::Minimal)
-          && (HasNonoverriddenMethods || !VTableEntries.empty()))
-        IGM.emitMethodLookupFunction(getType());
-
       if (VTableEntries.empty())
         return;
       
+      // Only emit a method lookup function if the class is resilient
+      // and has a non-empty vtable.
+      if (IGM.hasResilientMetadata(getType(), ResilienceExpansion::Minimal))
+        IGM.emitMethodLookupFunction(getType());
+
       auto offset = MetadataLayout->hasResilientSuperclass()
                       ? MetadataLayout->getRelativeVTableOffset()
                       : MetadataLayout->getStaticVTableOffset();
@@ -1668,12 +1612,41 @@ namespace {
                       B.getAddrOfCurrentPosition(IGM.MethodDescriptorStructTy));
 
       // Actually build the descriptor.
+      auto *func = cast<AbstractFunctionDecl>(fn.getDecl());
       auto descriptor = B.beginStruct(IGM.MethodDescriptorStructTy);
-      buildMethodDescriptorFields(IGM, VTable, fn, descriptor);
+
+      // Classify the method.
+      using Flags = MethodDescriptorFlags;
+      auto flags = getMethodDescriptorFlags<Flags>(func);
+
+      // Remember if the declaration was dynamic.
+      if (func->shouldUseObjCDispatch())
+        flags = flags.withIsDynamic(true);
+
+      // Include the pointer-auth discriminator.
+      if (auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods) {
+        auto discriminator =
+          PointerAuthInfo::getOtherDiscriminator(IGM, schema, fn);
+        flags = flags.withExtraDiscriminator(discriminator->getZExtValue());
+      }
+
+      // TODO: final? open?
+      descriptor.addInt(IGM.Int32Ty, flags.getIntValue());
+
+      if (auto entry = VTable->getEntry(IGM.getSILModule(), fn)) {
+        assert(entry->getKind() == SILVTable::Entry::Kind::Normal);
+        auto *implFn = IGM.getAddrOfSILFunction(entry->getImplementation(),
+                                                NotForDefinition);
+        descriptor.addRelativeAddress(implFn);
+      } else {
+        // The method is removed by dead method elimination.
+        // It should be never called. We add a pointer to an error function.
+        descriptor.addRelativeAddressOrNull(nullptr);
+      }
+
       descriptor.finishAndAddTo(B);
 
       // Emit method dispatch thunk if the class is resilient.
-      auto *func = cast<AbstractFunctionDecl>(fn.getDecl());
       if (Resilient &&
           func->getEffectiveAccess() >= AccessLevel::Public) {
         IGM.emitDispatchThunk(fn);
@@ -1681,26 +1654,6 @@ namespace {
     }
     
     void emitNonoverriddenMethod(SILDeclRef fn) {
-      // TODO: Derivative functions do not distinguish themselves in the mangled
-      // names of method descriptor symbols yet, causing symbol name collisions.
-      if (fn.derivativeFunctionIdentifier)
-        return;
-
-     HasNonoverriddenMethods = true;
-      // Although this method is non-overridden and therefore left out of the
-      // vtable, we still need to maintain the ABI of a potentially-overridden
-      // method for external clients.
-      
-      // Emit method dispatch thunk.
-      if (hasPublicVisibility(fn.getLinkage(NotForDefinition))) {
-        IGM.emitDispatchThunk(fn);
-      }
-      
-      // Emit a freestanding method descriptor structure. This doesn't have to
-      // exist in the table in the class's context descriptor since it isn't
-      // in the vtable, but external clients need to be able to link against the
-      // symbol.
-      IGM.emitNonoverriddenMethodDescriptor(VTable, fn);
     }
 
     void addOverrideTable() {
@@ -5212,30 +5165,14 @@ void IRGenModule::emitOpaqueTypeDecl(OpaqueTypeDecl *D) {
 bool irgen::methodRequiresReifiedVTableEntry(IRGenModule &IGM,
                                              const SILVTable *vtable,
                                              SILDeclRef method) {
-  Optional<SILVTable::Entry> entry
-    = vtable->getEntry(IGM.getSILModule(), method);
-  LLVM_DEBUG(llvm::dbgs() << "looking at vtable:\n";
-             vtable->print(llvm::dbgs()));
+  auto entry = vtable->getEntry(IGM.getSILModule(), method);
   if (!entry) {
-    LLVM_DEBUG(llvm::dbgs() << "vtable entry in "
-                            << vtable->getClass()->getName()
-                            << " for ";
-               method.print(llvm::dbgs());
-               llvm::dbgs() << " is not available\n");
     return true;
   }
-  LLVM_DEBUG(llvm::dbgs() << "entry: ";
-             entry->print(llvm::dbgs());
-             llvm::dbgs() << "\n");
   
   // We may be able to elide the vtable entry, ABI permitting, if it's not
   // overridden.
   if (!entry->isNonOverridden()) {
-    LLVM_DEBUG(llvm::dbgs() << "vtable entry in "
-                            << vtable->getClass()->getName()
-                            << " for ";
-               method.print(llvm::dbgs());
-               llvm::dbgs() << " is overridden\n");
     return true;
   }
   
@@ -5244,29 +5181,13 @@ bool irgen::methodRequiresReifiedVTableEntry(IRGenModule &IGM,
   // and it's either marked fragile or part of a non-resilient module, then
   // other modules will directly address vtable offsets and we can't remove
   // vtable entries.
-  auto originatingClass =
-    cast<ClassDecl>(method.getOverriddenVTableEntry().getDecl()->getDeclContext());
-
-  if (originatingClass->getEffectiveAccess() >= AccessLevel::Public) {
-    // If the class is public,
-    // and it's either marked fragile or part of a non-resilient module, then
-    // other modules will directly address vtable offsets and we can't remove
-    // vtable entries.
-    if (!originatingClass->isResilient()) {
-      LLVM_DEBUG(llvm::dbgs() << "vtable entry in "
-                              << vtable->getClass()->getName()
-                              << " for ";
-                 method.print(llvm::dbgs());
-                 llvm::dbgs() << " originates from a public fragile class\n");
-      return true;
-    }
+  if (vtable->getClass()->getEffectiveAccess() >= AccessLevel::Public) {
+    // TODO: Check whether we use a resilient ABI to access this
+    // class's methods. We can drop unnecessary vtable entries if we do;
+    // otherwise fixed vtable offsets are part of the ABI.
+    return true;
   }
     
   // Otherwise, we can leave this method out of the runtime vtable.
-  LLVM_DEBUG(llvm::dbgs() << "vtable entry in "
-                          << vtable->getClass()->getName()
-                          << " for ";
-             method.print(llvm::dbgs());
-             llvm::dbgs() << " can be elided\n");
   return false;
 }
